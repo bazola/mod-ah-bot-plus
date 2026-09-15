@@ -109,11 +109,13 @@ public:
 class AuctionHouseBotCharacter
 {
 public:
-    AuctionHouseBotCharacter(uint32 accountID, uint32 characterGUID) :
+    AuctionHouseBotCharacter(uint32 accountID, uint32 characterGUID, TeamId team = TEAM_NEUTRAL) :
         AccountID(accountID),
-        CharacterGUID(characterGUID) { }
+        CharacterGUID(characterGUID),
+        Team(team) { }
     uint32 AccountID;
     ObjectGuid::LowType CharacterGUID;
+    TeamId Team; // local: custom-wow merchants (the seller's side picks which house it trades in)
 };
 
 class AuctionHouseBot
@@ -333,6 +335,19 @@ private:
     int ActiveListMultipleItemID;
     int RemainingListMultipleCount;
 
+    // local: custom-wow (allow-list, tempo, market prices)
+    bool AllowedItemIDsActive;
+    std::unordered_set<uint32> AllowedItemIDs;
+    bool TempoEnabled;
+    std::vector<float> TempoHourWeights;
+    uint32 TempoOnlineReference;
+    float TempoMinFactor;
+    float TempoMaxFactor;
+    bool MarketPricesEnabled;
+    uint32 MarketPricesRefreshMinutes;
+    time_t MarketPricesNextLoad;
+    std::unordered_map<uint32, uint64> MarketPricesByItemID;
+
     AuctionHouseBot();
 
 public:
@@ -380,6 +395,17 @@ public:
     void AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, FactionSpecificAuctionHouseConfig* config);
     void PopulateVendorItemsPrices();
     void CleanupExpiredAuctionItems();
+
+    // local: custom-wow
+    void EnsureMerchants();
+    uint32 GetMerchantAccountId(std::string const& accountName);
+    std::string GetMerchantGUIDs();
+    bool MerchantsConfigured();
+    void LoadAllowedItemIDs();
+    void LoadMarketPrices();
+    float GetTempoFactor();
+    uint32 ScaleByTempo(uint32 count);
+    Player* PickTrader(std::vector<Player*> const& players, FactionSpecificAuctionHouseConfig* config);
 
     template <typename ValueType>
     void AddItemValuePairsToItemIDMap(std::unordered_map<uint32, ValueType>& workingValueToItemIDMap, std::string valueToItemIDMap);

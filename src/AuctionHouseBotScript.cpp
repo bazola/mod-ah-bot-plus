@@ -42,6 +42,11 @@ public:
         if (!auctionbot->IsModuleEnabled())
             return;
 
+        // local: custom-wow merchants. Characters are created here, where the player guid generator is ready, then
+        // the character list is read again so they are included.
+        auctionbot->EnsureMerchants();
+        auctionbot->InitializeConfiguration();
+
         LOG_INFO("server.loading", "AuctionHouseBot: (Re)populating item candidate lists ...");
         auctionbot->PopulateItemCandidatesAndProportions();
         if (sConfigMgr->GetOption<bool>("AuctionHouseBot.AdvancedListingRules.UseDropRates.Enabled", false))
@@ -210,6 +215,7 @@ public:
 
         // Reload config file with isReload = true
         sConfigMgr->LoadModulesConfigs(true, false);
+        AuctionHouseBot::instance()->EnsureMerchants(); // local: custom-wow merchants
         AuctionHouseBot::instance()->InitializeConfiguration();
         AuctionHouseBot::instance()->PopulateItemCandidatesAndProportions();
 

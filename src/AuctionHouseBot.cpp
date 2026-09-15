@@ -31,6 +31,18 @@
 #include "SpellMgr.h"
 #include <cmath>
 
+// local: custom-wow
+#include "CharacterCache.h"
+#include "CryptoRandom.h"
+#include "ObjectAccessor.h"
+#include "SRP6.h"
+#include "StringConvert.h"
+#include "Tokenize.h"
+#include "Timer.h"
+#include "Util.h"
+#include <algorithm>
+#include <fstream>
+
 #include <set>
 #include <unordered_map>
 
@@ -186,7 +198,15 @@ AuctionHouseBot::AuctionHouseBot() :
     LastBuyCycleCount(0),
     LastSellCycleCount(0),
     ActiveListMultipleItemID(0),
-    RemainingListMultipleCount(0)
+    RemainingListMultipleCount(0),
+    AllowedItemIDsActive(false),
+    TempoEnabled(false),
+    TempoOnlineReference(0),
+    TempoMinFactor(0.25f),
+    TempoMaxFactor(2.0f),
+    MarketPricesEnabled(false),
+    MarketPricesRefreshMinutes(10),
+    MarketPricesNextLoad(0)
 {
     AllianceConfig = FactionSpecificAuctionHouseConfig(2);
     HordeConfig = FactionSpecificAuctionHouseConfig(6);
@@ -308,6 +328,23 @@ void AuctionHouseBot::CalculateItemValue(ItemTemplate const* itemProto, uint64& 
         }
     }
 
+    // local: custom-wow market prices. A price learned from real sales replaces the calculated one; the variations
+    // still apply, so listings of one item don't all carry the same price. Never below what a vendor pays.
+    if (MarketPricesEnabled == true)
+    {
+        auto it = MarketPricesByItemID.find(itemProto->ItemId);
+        if (it != MarketPricesByItemID.end())
+        {
+            uint64 unitPrice = std::max<uint64>(it->second, std::max<uint32>(itemProto->SellPrice, 1));
+            unitPrice = std::min<uint64>(unitPrice, MaxBuyoutPriceInCopper / 2);
+            outBuyoutPrice = urand(uint32(unitPrice * (1.0f - BuyoutVariationReducePercent)), uint32(unitPrice * (1.0f + BuyoutVariationAddPercent)));
+            outBuyoutPrice = std::max<uint64>(outBuyoutPrice, std::max<uint32>(itemProto->SellPrice, 1));
+            float bidTopPercent = 1.0f - BidVariationHighReducePercent;
+            float bidBottomPercent = 1.0f - BidVariationLowReducePercent;
+            outBidPrice = std::max<uint64>(1, urand(uint32(bidBottomPercent * outBuyoutPrice), uint32(bidTopPercent * outBuyoutPrice)));
+            return;
+        }
+    }
 
     // Start with a buyout price related to the sell price, if configured
     if (UseItemSellPriceIfHigherThanPriceMinimumCenterBase == true)
@@ -762,6 +799,10 @@ void AuctionHouseBot::PopulateItemCandidatesAndProportions()
         if (itr->second.ItemId == 0)
             continue;
 
+        // local: custom-wow allow-list (the era's items). Drop-rate tiers are built from these candidates.
+        if (AllowedItemIDsActive && AllowedItemIDs.find(itr->second.ItemId) == AllowedItemIDs.end())
+            continue;
+
         // If there is an iLevel exception, honor it
         if (ListedItemLevelRestrictedEnabled == true)
         {
@@ -1057,9 +1098,14 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
         return;
     }
 
+    // local: custom-wow tempo
+    uint32 itemsPerCycle = ScaleByTempo(ItemsPerCycle);
+    if (itemsPerCycle == 0)
+        return;
+
     uint32 newItemsToListCount = 0;
-    if ((maxItems - currentAuctionItemListCount) >= ItemsPerCycle)
-        newItemsToListCount = ItemsPerCycle;
+    if ((maxItems - currentAuctionItemListCount) >= itemsPerCycle)
+        newItemsToListCount = itemsPerCycle;
     else
         newItemsToListCount = (maxItems - currentAuctionItemListCount);
 
@@ -1146,7 +1192,7 @@ void AuctionHouseBot::AddNewAuctions(std::vector<Player*> AHBPlayers, FactionSpe
                 }
             }
 
-            Player* AHBplayer = AHBPlayers[urand(0, AHBPlayers.size() - 1)];
+            Player* AHBplayer = PickTrader(AHBPlayers, config); // local: custom-wow merchants
 
             Item* item = Item::CreateItem(itemID, 1, AHBplayer);
             if (item == NULL)
@@ -1678,7 +1724,7 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
         possibleBids.push_back(tmpdata);
     } while (result->NextRow());
 
-    int randBuyingBotBuyCandidatesPerBuyCycle = urand(BuyingBotBuyCandidatesPerBuyCycleMin, BuyingBotBuyCandidatesPerBuyCycleMax);
+    int randBuyingBotBuyCandidatesPerBuyCycle = ScaleByTempo(urand(BuyingBotBuyCandidatesPerBuyCycleMin, BuyingBotBuyCandidatesPerBuyCycleMax)); // local: custom-wow tempo
     for (int count = 1; count <= randBuyingBotBuyCandidatesPerBuyCycle; ++count)
     {
         // Do we have anything to bid? If not, stop here.
@@ -1807,7 +1853,7 @@ void AuctionHouseBot::AddNewAuctionBuyerBotBid(std::vector<Player*> AHBPlayers, 
             LOG_INFO("module", "-------------------------------------------------");
         }
 
-        Player* AHBplayer = AHBPlayers[urand(0, AHBPlayers.size() - 1)];
+        Player* AHBplayer = PickTrader(AHBPlayers, config); // local: custom-wow merchants
 
         if (doBid)
         {
@@ -1857,6 +1903,10 @@ void AuctionHouseBot::Update()
 
     if ((SellingBotEnabled == false) && (BuyingBotEnabled == false))
         return;
+
+    // local: custom-wow market prices
+    if (MarketPricesEnabled && time(nullptr) >= MarketPricesNextLoad)
+        LoadMarketPrices();
 
     LastBuyCycleCount++;
     LastSellCycleCount++;
@@ -1941,7 +1991,7 @@ bool AuctionHouseBot::IsModuleEnabled()
     if (sellerEnabled == false && buyerEnabled == false)
         return false;
     string charString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.GUIDs", "0");
-    if (charString == "0" || charString.empty())
+    if ((charString == "0" || charString.empty()) && !MerchantsConfigured()) // local: custom-wow merchants
     {
         LOG_INFO("module", "AuctionHouseBot: AuctionHouseBot.GUIDs is not configured so this module will be disabled");
         return false;
@@ -1958,7 +2008,40 @@ void AuctionHouseBot::InitializeConfiguration()
     BuyingBotEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.Buyer.Enabled", false);
 
     string charString = sConfigMgr->GetOption<std::string>("AuctionHouseBot.GUIDs", "0");
-    AddCharacters(charString);
+
+    // local: custom-wow merchants. Before the first startup they don't exist yet; OnStartup creates them and reads
+    // the configuration again.
+    std::string merchantGUIDs = GetMerchantGUIDs();
+    if (!merchantGUIDs.empty())
+        charString = (charString == "0" || charString.empty()) ? merchantGUIDs : charString + "," + merchantGUIDs;
+    if ((charString == "0" || charString.empty()) && MerchantsConfigured())
+        AHCharacters.clear();
+    else
+        AddCharacters(charString);
+
+    // local: custom-wow allow-list, tempo and market prices
+    LoadAllowedItemIDs();
+    TempoEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.Tempo.Enabled", false);
+    TempoHourWeights.clear();
+    {
+        std::stringstream weights(sConfigMgr->GetOption<std::string>("AuctionHouseBot.Tempo.HourWeights", ""));
+        std::string weight;
+        while (std::getline(weights, weight, ','))
+            TempoHourWeights.push_back(std::max(0.0f, Acore::StringTo<float>(Acore::String::Trim(weight, std::locale())).value_or(1.0f)));
+    }
+    if (TempoEnabled && !TempoHourWeights.empty() && TempoHourWeights.size() != 24)
+    {
+        LOG_ERROR("module", "AuctionHouseBot: Tempo.HourWeights needs 24 values, found {}; hours are ignored", TempoHourWeights.size());
+        TempoHourWeights.clear();
+    }
+    TempoOnlineReference = sConfigMgr->GetOption<uint32>("AuctionHouseBot.Tempo.OnlineReference", 0);
+    TempoMinFactor = sConfigMgr->GetOption<float>("AuctionHouseBot.Tempo.MinFactor", 0.25f);
+    TempoMaxFactor = std::max(TempoMinFactor, sConfigMgr->GetOption<float>("AuctionHouseBot.Tempo.MaxFactor", 2.0f));
+    MarketPricesEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.MarketPrices.Enabled", false);
+    MarketPricesRefreshMinutes = std::max<uint32>(1, sConfigMgr->GetOption<uint32>("AuctionHouseBot.MarketPrices.RefreshMinutes", 10));
+    MarketPricesNextLoad = 0;
+    if (!MarketPricesEnabled)
+        MarketPricesByItemID.clear();
 
     // Top level overrides
     CompleteItemValueOverrideEnabled = sConfigMgr->GetOption<bool>("AuctionHouseBot.CompleteItemValueOverride.Enabled", false);
@@ -2410,7 +2493,7 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
         AHCharactersGUIDsForQuery += std::to_string(curGUID);
         first = false;
     }
-    QueryResult queryResult = CharacterDatabase.Query("SELECT `guid`, `account` FROM `characters` WHERE guid IN ({})", AHCharactersGUIDsForQuery);
+    QueryResult queryResult = CharacterDatabase.Query("SELECT `guid`, `account`, `race` FROM `characters` WHERE guid IN ({})", AHCharactersGUIDsForQuery); // local: custom-wow merchants (race)
     if (!queryResult || queryResult->GetRowCount() == 0)
     {
         LOG_ERROR("module", "AuctionHouseBot: No character GUIDs found when looking up values from AuctionHouseBot.GUIDs from the character database 'characters.guid'.");
@@ -2422,7 +2505,8 @@ void AuctionHouseBot::AddCharacters(std::string characterGUIDString)
         Field* fields = queryResult->Fetch();
         uint32 guid = fields[0].Get<uint32>();
         uint32 account = fields[1].Get<uint32>();
-        AuctionHouseBotCharacter curChar = AuctionHouseBotCharacter(account, guid);
+        TeamId team = Player::TeamIdForRace(fields[2].Get<uint8>()); // local: custom-wow merchants
+        AuctionHouseBotCharacter curChar = AuctionHouseBotCharacter(account, guid, team);
         AHCharacters.push_back(curChar);
     } while (queryResult->NextRow());
 }
@@ -2686,4 +2770,213 @@ bool AuctionHouseBot::IsItemEligibleForDBDropRates(ItemTemplate const* proto)
             !IsItemCrafted(proto->ItemId) &&
             !IsItemQuestReward(proto->ItemId)
     );
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// local: custom-wow (custom wow plans/17). Merchants: sellers with in-world names on one account nobody logs into.
+
+bool AuctionHouseBot::MerchantsConfigured()
+{
+    return !sConfigMgr->GetOption<std::string>("AuctionHouseBot.Merchants.Account", "").empty() &&
+        !sConfigMgr->GetOption<std::string>("AuctionHouseBot.Merchants.Characters", "").empty();
+}
+
+uint32 AuctionHouseBot::GetMerchantAccountId(std::string const& accountName)
+{
+    std::string name = accountName;
+    if (name.empty() || !Utf8ToUpperOnlyLatin(name))
+        return 0;
+    LoginDatabase.EscapeString(name);
+    QueryResult result = LoginDatabase.Query("SELECT `id` FROM `account` WHERE `username` = '{}'", name);
+    return result ? result->Fetch()[0].Get<uint32>() : 0;
+}
+
+std::string AuctionHouseBot::GetMerchantGUIDs()
+{
+    if (!MerchantsConfigured())
+        return "";
+    uint32 accountId = GetMerchantAccountId(sConfigMgr->GetOption<std::string>("AuctionHouseBot.Merchants.Account", ""));
+    if (!accountId)
+        return "";
+    QueryResult result = CharacterDatabase.Query("SELECT `guid` FROM `characters` WHERE `account` = {} AND `deleteInfos_Account` IS NULL ORDER BY `guid`", accountId);
+    if (!result)
+        return "";
+    std::string guids;
+    do
+    {
+        if (!guids.empty())
+            guids += ",";
+        guids += std::to_string(result->Fetch()[0].Get<uint32>());
+    } while (result->NextRow());
+    return guids;
+}
+
+// Runs on the world thread from OnStartup (and .ahbot reload), after the guid generators are set.
+void AuctionHouseBot::EnsureMerchants()
+{
+    if (!MerchantsConfigured())
+        return;
+
+    std::string accountName = sConfigMgr->GetOption<std::string>("AuctionHouseBot.Merchants.Account", "");
+    if (!Utf8ToUpperOnlyLatin(accountName) || accountName.size() > 16)
+    {
+        LOG_ERROR("module", "AuctionHouseBot: Merchants.Account '{}' is not a usable account name", accountName);
+        return;
+    }
+
+    uint32 accountId = GetMerchantAccountId(accountName);
+    if (!accountId)
+    {
+        // A random password that is never shown or stored: nobody can log in, so no merchant is ever online twice.
+        std::string password = ByteArrayToHexStr(Acore::Crypto::GetRandomBytes<8>());
+        Utf8ToUpperOnlyLatin(password);
+        auto [salt, verifier] = Acore::Crypto::SRP6::MakeRegistrationData(accountName, password);
+        LoginDatabase.DirectExecute("INSERT INTO `account` (`username`, `salt`, `verifier`, `expansion`, `reg_mail`, `email`, `joindate`) "
+            "VALUES ('{}', 0x{}, 0x{}, {}, '', '', NOW())", accountName, ByteArrayToHexStr(salt), ByteArrayToHexStr(verifier),
+            sWorld->getIntConfig(CONFIG_EXPANSION));
+        accountId = GetMerchantAccountId(accountName);
+        if (!accountId)
+        {
+            LOG_ERROR("module", "AuctionHouseBot: could not create the merchants account '{}'", accountName);
+            return;
+        }
+        LOG_INFO("module", "AuctionHouseBot: created the merchants account '{}' (id {})", accountName, accountId);
+    }
+
+    std::stringstream entries(sConfigMgr->GetOption<std::string>("AuctionHouseBot.Merchants.Characters", ""));
+    std::string entry;
+    while (std::getline(entries, entry, ','))
+    {
+        std::vector<std::string_view> parts = Acore::Tokenize(entry, ':', false);
+        if (parts.size() != 4)
+        {
+            LOG_ERROR("module", "AuctionHouseBot: merchant '{}' is not Name:race:class:gender", entry);
+            continue;
+        }
+
+        std::string name(Acore::String::Trim(parts[0], std::locale()));
+        uint8 race = Acore::StringTo<uint8>(Acore::String::Trim(parts[1], std::locale())).value_or(0);
+        uint8 playerClass = Acore::StringTo<uint8>(Acore::String::Trim(parts[2], std::locale())).value_or(0);
+        uint8 gender = Acore::StringTo<uint8>(Acore::String::Trim(parts[3], std::locale())).value_or(0);
+        PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race, playerClass);
+        if (!normalizePlayerName(name) || ObjectMgr::CheckPlayerName(name, true) != CHAR_NAME_SUCCESS || !info || gender > GENDER_FEMALE)
+        {
+            LOG_ERROR("module", "AuctionHouseBot: merchant '{}' has an invalid name, race/class or gender", entry);
+            continue;
+        }
+
+        ObjectGuid existing = sCharacterCache->GetCharacterGuidByName(name);
+        if (existing)
+        {
+            if (sCharacterCache->GetCharacterAccountIdByGuid(existing) != accountId)
+                LOG_ERROR("module", "AuctionHouseBot: merchant name '{}' belongs to another account, skipped", name);
+            continue;
+        }
+
+        ObjectGuid::LowType guid = sObjectMgr->GetGenerator<HighGuid::Player>().Generate();
+        CharacterDatabase.DirectExecute("INSERT INTO `characters` (`guid`, `account`, `name`, `race`, `class`, `gender`, `level`, "
+            "`position_x`, `position_y`, `position_z`, `map`, `orientation`, `zone`, `taximask`, `innTriggerId`) "
+            "VALUES ({}, {}, '{}', {}, {}, {}, 1, {}, {}, {}, {}, {}, {}, '', 0)",
+            guid, accountId, name, race, playerClass, gender, info->positionX, info->positionY, info->positionZ, info->mapId,
+            info->orientation, info->areaId);
+        sCharacterCache->AddCharacterCacheEntry(ObjectGuid::Create<HighGuid::Player>(guid), accountId, name, gender, race, playerClass, 1);
+        LOG_INFO("module", "AuctionHouseBot: created merchant {} (guid {})", name, guid);
+    }
+}
+
+void AuctionHouseBot::LoadAllowedItemIDs()
+{
+    AllowedItemIDs.clear();
+    std::string path = sConfigMgr->GetOption<std::string>("AuctionHouseBot.AllowedItemIDsFile", "");
+    AllowedItemIDsActive = !path.empty();
+    if (!AllowedItemIDsActive)
+        return;
+
+    std::ifstream in(path);
+    if (!in)
+    {
+        LOG_ERROR("module", "AuctionHouseBot: AllowedItemIDsFile '{}' can't be read; the seller will list nothing", path);
+        return;
+    }
+
+    std::string line;
+    while (std::getline(in, line))
+    {
+        size_t comment = line.find('#');
+        if (comment != std::string::npos)
+            line.erase(comment);
+        if (Optional<uint32> id = Acore::StringTo<uint32>(Acore::String::Trim(line, std::locale())))
+            AllowedItemIDs.insert(*id);
+    }
+    LOG_INFO("module", "AuctionHouseBot: {} items allowed by '{}'", AllowedItemIDs.size(), path);
+}
+
+// Learned per-unit prices from market_price (kept by custom-wow services/economy/market.py). Small table, world thread.
+void AuctionHouseBot::LoadMarketPrices()
+{
+    MarketPricesNextLoad = time(nullptr) + MarketPricesRefreshMinutes * MINUTE;
+
+    std::unordered_map<uint32, uint64> prices;
+    if (CharacterDatabase.Query("SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'market_price'"))
+    {
+        if (QueryResult result = CharacterDatabase.Query("SELECT `item_entry`, `unit_copper` FROM `market_price` WHERE `unit_copper` > 0"))
+        {
+            do
+            {
+                Field* fields = result->Fetch();
+                prices[fields[0].Get<uint32>()] = fields[1].Get<uint32>();
+            } while (result->NextRow());
+        }
+    }
+    MarketPricesByItemID.swap(prices);
+    if (debug_Out)
+        LOG_INFO("module", "AuctionHouseBot: {} learned market prices", MarketPricesByItemID.size());
+}
+
+float AuctionHouseBot::GetTempoFactor()
+{
+    if (!TempoEnabled)
+        return 1.0f;
+
+    time_t now = time(nullptr);
+    std::tm local{};
+    localtime_r(&now, &local);
+    float factor = TempoHourWeights.size() == 24 ? TempoHourWeights[local.tm_hour] : 1.0f;
+    if (TempoOnlineReference > 0)
+        factor *= float(ObjectAccessor::GetPlayers().size()) / float(TempoOnlineReference);
+    return std::clamp(factor, TempoMinFactor, TempoMaxFactor);
+}
+
+// Whole part always, the fraction as a chance, so small counts still follow the tempo on average.
+uint32 AuctionHouseBot::ScaleByTempo(uint32 count)
+{
+    if (!TempoEnabled)
+        return count;
+    float scaled = float(count) * GetTempoFactor();
+    uint32 whole = uint32(scaled);
+    if (frand(0.0f, 1.0f) < scaled - float(whole))
+        ++whole;
+    return whole;
+}
+
+// AHBPlayers is built in AHCharacters order. Alliance and Horde houses trade with their own side's merchants when
+// there are any; the neutral houses with anyone.
+Player* AuctionHouseBot::PickTrader(std::vector<Player*> const& players, FactionSpecificAuctionHouseConfig* config)
+{
+    TeamId team = TEAM_NEUTRAL;
+    if (config->GetAHID() == 2)
+        team = TEAM_ALLIANCE;
+    else if (config->GetAHID() == 6)
+        team = TEAM_HORDE;
+
+    if (team != TEAM_NEUTRAL && players.size() == AHCharacters.size())
+    {
+        std::vector<Player*> side;
+        for (size_t i = 0; i < players.size(); ++i)
+            if (AHCharacters[i].Team == team)
+                side.push_back(players[i]);
+        if (!side.empty())
+            return side[urand(0, side.size() - 1)];
+    }
+    return players[urand(0, players.size() - 1)];
 }
