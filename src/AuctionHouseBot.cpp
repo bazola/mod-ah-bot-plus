@@ -2854,10 +2854,10 @@ void AuctionHouseBot::EnsureMerchants()
             continue;
         }
 
-        std::string name(Acore::String::Trim(parts[0], std::locale()));
-        uint8 race = Acore::StringTo<uint8>(Acore::String::Trim(parts[1], std::locale())).value_or(0);
-        uint8 playerClass = Acore::StringTo<uint8>(Acore::String::Trim(parts[2], std::locale())).value_or(0);
-        uint8 gender = Acore::StringTo<uint8>(Acore::String::Trim(parts[3], std::locale())).value_or(0);
+        std::string name(Acore::String::Trim(std::string(parts[0]), std::locale()));
+        uint8 race = Acore::StringTo<uint8>(Acore::String::Trim(std::string(parts[1]), std::locale())).value_or(0);
+        uint8 playerClass = Acore::StringTo<uint8>(Acore::String::Trim(std::string(parts[2]), std::locale())).value_or(0);
+        uint8 gender = Acore::StringTo<uint8>(Acore::String::Trim(std::string(parts[3]), std::locale())).value_or(0);
         PlayerInfo const* info = sObjectMgr->GetPlayerInfo(race, playerClass);
         if (!normalizePlayerName(name) || ObjectMgr::CheckPlayerName(name, true) != CHAR_NAME_SUCCESS || !info || gender > GENDER_FEMALE)
         {
