@@ -1,0 +1,44 @@
+mod-ah-bot-plus
+A fork of NathanHandley/mod-ah-bot-plus, on the custom-wow branch.
+
+Licensing: read the file headers
+--------------------------------
+
+This repository has no LICENSE file, and neither does upstream. The terms
+therefore come from the header of each source file, and they are not all the
+same. Nothing here relicenses upstream's work; this file only records what the
+headers say, so that anyone redistributing the module knows which terms apply
+to which file.
+
+    src/ah_bot_loader.cpp          GNU AGPL v3
+    src/AuctionHouseBotScript.cpp  GNU AGPL v3
+        Both carry AzerothCore's header: "Copyright (C) 2016+ AzerothCore
+        <www.azerothcore.org>, released under GNU AGPL v3 license".
+
+    src/AuctionHouseBot.cpp        GPL-2.0-or-later
+    src/AuctionHouseBot.h          GPL-2.0-or-later
+        Both carry "Copyright (C) 2008-2010 Trinity", "Copyright (C) 2005-2009
+        MaNGOS" and "Copyright (C) 2023+ Nathan Handley", under the GNU General
+        Public License "either version 2 of the License, or (at your option)
+        any later version".
+
+Our changes
+-----------
+
+The custom-wow branch adds merchant characters, an era allow-list, learned
+market prices and listing tempo. Those commits modify
+src/AuctionHouseBot.cpp, src/AuctionHouseBot.h, src/AuctionHouseBotScript.cpp
+and conf/mod_ahbot.conf.dist, so our changes to them are offered under the same
+terms as the file they change: GPL-2.0-or-later for the AuctionHouseBot files,
+GNU AGPL v3 for AuctionHouseBotScript.cpp.
+
+Upstream has been asked to add a LICENSE file. If one lands, it governs and
+this note should be replaced by it.
+
+The combined server binary
+--------------------------
+
+AzerothCore links its modules statically. Built into the worldserver alongside
+AGPL-3.0 modules, the combined binary is AGPL-3.0, and anyone who runs that
+server for other people must offer them its source. The files in this
+repository keep the terms above.
